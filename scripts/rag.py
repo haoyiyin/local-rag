@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """local-rag: ingest, ask, and manage Chroma collections."""
 
-import argparse, hashlib, json, os, sys, textwrap, time
+import argparse, glob, hashlib, json, os, sys, textwrap, tempfile, time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
@@ -38,6 +39,59 @@ def _chunks(text, max_chars=1200):
     if cur:
         chunks.append("\n\n".join(cur))
     return chunks or [text[:max_chars]]
+
+
+ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz", ".7z", ".rar"}
+
+def _is_archive(path):
+    """Check if file is a supported archive format."""
+    lower = path.lower()
+    for ext in [".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz2", ".txz"]:
+        if lower.endswith(ext):
+            return True
+    return Path(path).suffix.lower() in ARCHIVE_EXTS
+
+def _extract_archive(path, dest):
+    """Extract archive to dest dir. Returns list of extracted file paths."""
+    lower = path.lower()
+    if lower.endswith(".zip"):
+        import zipfile
+        with zipfile.ZipFile(path, "r") as zf:
+            zf.extractall(dest)
+    elif lower.endswith((".tar.gz", ".tgz")):
+        import tarfile
+        with tarfile.open(path, "r:gz") as tf:
+            tf.extractall(dest, filter="data")
+    elif lower.endswith((".tar.bz2", ".tbz2")):
+        import tarfile
+        with tarfile.open(path, "r:bz2") as tf:
+            tf.extractall(dest, filter="data")
+    elif lower.endswith((".tar.xz", ".txz")):
+        import tarfile
+        with tarfile.open(path, "r:xz") as tf:
+            tf.extractall(dest, filter="data")
+    elif lower.endswith(".tar"):
+        import tarfile
+        with tarfile.open(path, "r") as tf:
+            tf.extractall(dest, filter="data")
+    elif lower.endswith(".7z"):
+        import py7zr
+        with py7zr.SevenZipFile(path, "r") as sz:
+            sz.extractall(dest)
+    elif lower.endswith(".rar"):
+        import rarfile
+        with rarfile.RarFile(path) as rf:
+            rf.extractall(dest)
+    else:
+        sys.exit(f"Unsupported archive format: {path}")
+    # Collect all non-hidden files
+    files = []
+    for root, dirs, fnames in os.walk(dest):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in fnames:
+            if not f.startswith("."):
+                files.append(os.path.join(root, f))
+    return sorted(files)
 
 
 def _read_file(path):
@@ -355,6 +409,61 @@ def cmd_purge(args):
 # ─── Data commands ───
 
 def cmd_ingest(args):
+    c = _client()
+    col = _coll(c, args.collection)
+
+    # Archive: extract and ingest all files inside
+    if args.path != "-" and _is_archive(args.path):
+        archive_name = os.path.basename(args.path)
+        tag = args.tag or archive_name
+        with tempfile.TemporaryDirectory(prefix="localrag_") as tmpdir:
+            files = _extract_archive(args.path, tmpdir)
+            if not files:
+                print(json.dumps({"error": "archive empty", "archive": archive_name}))
+                return
+            total_chunks = 0
+            ingested = []
+            for fpath in files:
+                ext = os.path.splitext(fpath)[1].lower()
+                if ext in (".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".go",
+                           ".rs", ".rb", ".php", ".swift", ".kt", ".sh", ".bat",
+                           ".exe", ".dll", ".so", ".dylib", ".bin", ".png", ".jpg",
+                           ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp",
+                           ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac",
+                           ".wma", ".opus", ".mp4", ".avi", ".mov", ".mkv"):
+                    continue  # skip binary/code files
+                try:
+                    text = _read_file(fpath)
+                except Exception:
+                    continue
+                if not text or not text.strip():
+                    continue
+                source = os.path.relpath(fpath, tmpdir)
+                chunks = _chunks(text)
+                ids = [_id(f"{archive_name}/{source}", i) for i in range(len(chunks))]
+                metas = [
+                    {"source": f"{archive_name}/{source}", "tag": tag,
+                     "chunk_idx": i, "archive": archive_name,
+                     "ingested_at": datetime.now(timezone.utc).isoformat()}
+                    for i in range(len(chunks))
+                ]
+                try:
+                    col.delete(where={"source": f"{archive_name}/{source}"})
+                except Exception:
+                    pass
+                col.add(documents=chunks, metadatas=metas, ids=ids)
+                total_chunks += len(chunks)
+                ingested.append({"file": source, "chunks": len(chunks)})
+            print(json.dumps({
+                "archive": archive_name,
+                "files_ingested": len(ingested),
+                "total_chunks": total_chunks,
+                "details": ingested,
+                "collection": args.collection or COLL,
+            }, ensure_ascii=False))
+        return
+
+    # Single file or stdin
     source = args.path
     if args.path == "-":
         text = sys.stdin.read()
@@ -370,10 +479,6 @@ def cmd_ingest(args):
         for i in range(len(chunks))
     ]
 
-    c = _client()
-    col = _coll(c, args.collection)
-
-    # Delete existing chunks for this source to keep idempotent
     try:
         col.delete(where={"source": source})
     except Exception:

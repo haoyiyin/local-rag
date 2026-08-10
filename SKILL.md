@@ -65,7 +65,7 @@ All output is JSON. `list` returns `[{name, id, count, metadata}]`.
 
 All data commands support `-c <collection>` to target a specific collection (default: `$KB_COLLECTION` or `default`).
 
-#### ingest — store files
+#### ingest — store files (including archives)
 
 ```bash
 python3 scripts/rag.py ingest <path> [--tag TAG] [--source LABEL] [-c COLLECTION]
@@ -73,7 +73,12 @@ echo "text" | python3 scripts/rag.py ingest - [--tag TAG] [-c COLLECTION]
 python3 scripts/rag.py ingest-text "text" [--source LABEL] [--tag TAG] [-c COLLECTION]
 ```
 
-Supported formats: `.md .txt .pdf .mp3/.wav/.ogg/.flac/.m4a/.aac/.wma/.opus` (whisper) `.png/.jpg/.jpeg/.gif/.bmp/.tiff/.tif/.webp` (OCR) `.docx .pptx .xlsx/.xls .csv .html/.htm .json/.jsonl .yaml/.yml .odt .epub .rtf .msg .ipynb`. Others: plain text.
+**Supported file formats:** `.md` `.txt` `.pdf` `.docx` `.pptx` `.xlsx` `.csv` `.html` `.json` `.yaml` `.epub` `.rtf` `.msg` `.ipynb` `.odt`
+
+**Supported archives (auto-detected, extracts all files inside):**
+`.zip` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tbz2` `.tar.xz` `.txz` `.7z` `.rar`
+
+When an archive is detected: extracts to temp dir, reads each file, skips binary files (images/audio/video/executables), and ingests all text content. Each file's source is recorded as `archive_name/filename`.
 
 Behavior: splits on blank lines, cap ~1200 chars/chunk. ID = `sha1(source+index)[:16]` → idempotent. PDF: pypdf first, OCR fallback for image PDFs. Audio: whisper base model CPU. Images: pytesseract chi_sim+eng.
 

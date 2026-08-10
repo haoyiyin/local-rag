@@ -308,14 +308,17 @@ def cmd_info(args):
     col = c.get_collection(args.name)
     n = col.count()
     peek = col.peek(limit=args.sample)
+    p_ids = peek["ids"] if isinstance(peek, dict) else peek.ids
+    p_docs = peek["documents"] if isinstance(peek, dict) else peek.documents
+    p_metas = peek["metadatas"] if isinstance(peek, dict) else peek.metadatas
     info = {
         "name": col.name,
         "id": str(col.id),
         "count": n,
         "metadata": col.metadata,
-        "sample_ids": peek.ids,
-        "sample_documents": peek.documents,
-        "sample_metadatas": peek.metadatas,
+        "sample_ids": p_ids,
+        "sample_documents": p_docs,
+        "sample_metadatas": p_metas,
     }
     print(json.dumps(info, ensure_ascii=False, indent=2))
 

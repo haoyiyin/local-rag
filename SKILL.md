@@ -23,8 +23,10 @@ Two layers: (1) `scripts/rag.py` CLI for quick ingest/ask, (2) full Chroma Pytho
 
 ## Connection
 
+Data stored locally at `~/.chroma/local-rag` (PersistentClient, no server needed).
+
 ```
-CHROMA_HOST=127.0.0.1  CHROMA_PORT=8100  KB_COLLECTION=default
+CHROMA_PATH=~/.chroma/local-rag  KB_COLLECTION=default
 ```
 
 `scripts/rag.py` reads these env vars. Embedding model: `embeddinggemma-300m` (768-dim, modelscope path).
@@ -98,14 +100,10 @@ python3 scripts/rag.py smoke
 ```python
 import chromadb
 
-# HTTP client (server mode)
-client = chromadb.HttpClient(host="127.0.0.1", port=8100)
+# Local persistent client (default — no server needed)
+client = chromadb.PersistentClient(path="~/.chroma/local-rag")
 
-# Async HTTP client
-client = await chromadb.AsyncHttpClient(host="127.0.0.1", port=8100)
-
-# With custom tenant/database
-client = chromadb.HttpClient(host="127.0.0.1", port=8100, tenant="my_tenant", database="my_db")
+# Async not available for PersistentClient; use sync API
 ```
 
 ### Client Methods
@@ -426,7 +424,7 @@ When user asks for complex queries (filters, pagination, batch ops, metadata man
 
 ```python
 import chromadb
-c = chromadb.HttpClient(host="127.0.0.1", port=8100)
+c = chromadb.PersistentClient(path=os.path.expanduser("~/.chroma/local-rag"))
 col = c.get_or_create_collection("default")
 # ... direct API calls
 ```
@@ -437,7 +435,7 @@ col = c.get_or_create_collection("default")
 
 - **No LLM in scripts.** ingest = embed+store. ask = retrieve. Synthesis = Hermes.
 - **ask is read-only.** Never writes.
-- **Surface failures.** Chroma unreachable → `Chroma down — run: docker compose -f ~/chroma/docker-compose.yml up -d`. Exit non-zero.
+- **Surface failures.** Exit non-zero with error message.
 - **Deterministic IDs.** sha1-based, idempotent re-ingest overwrites.
 - **v2 API only.** No `Settings(anonymized_telemetry=...)` — that's v1.
 

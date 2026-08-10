@@ -176,18 +176,45 @@ All data commands accept `-c <collection>` to target a specific collection.
 
 ## Agent Installation Guide
 
-This skill is designed to be installed by AI agents. When installing:
+This skill is designed to be installed by AI agents. **Check each dependency before installing — skip if already present.**
 
-1. **Check dependencies first** — skip anything already installed
-2. **Deploy Chroma** via docker compose if not running
-3. **Install Python packages** that are missing
-4. **Copy the skill** to the correct path:
-   - `~/.hermes/skills/mlops/local-rag/` for Hermes Agent
-   - Adapt path for other agents based on their skill directory
-5. **Ask the user** what they want to name their first knowledge base
-6. **Create the collection** and confirm it's working with `smoke`
+### Pre-flight Checks
 
-The embedding model (`embeddinggemma-300m`) downloads automatically on first use — no manual setup needed.
+```bash
+# 1. Chroma running?
+if curl -fsS http://127.0.0.1:8100/api/v2/heartbeat >/dev/null 2>&1; then
+  echo "Chroma OK — skip deploy"
+else
+  echo "Chroma not running — need docker compose deploy"
+fi
+
+# 2. Docker available? (only needed if deploying Chroma)
+docker --version 2>/dev/null || echo "Docker missing — ask user to install"
+
+# 3. Embedding model cached?
+if [ -d "$HOME/.cache/modelscope/models/google--embeddinggemma-300m" ]; then
+  echo "Model OK — skip download"
+else
+  echo "Model not cached — will auto-download on first use (~80MB)"
+fi
+
+# 4. Python deps (import-check each, install only missing)
+python3 -c "import chromadb" 2>/dev/null && echo "chromadb OK" || echo "pip install chromadb"
+python3 -c "import pypdf" 2>/dev/null && echo "pypdf OK" || echo "pip install pypdf"
+python3 -c "import docx" 2>/dev/null && echo "python-docx OK" || echo "pip install python-docx"
+python3 -c "import pptx" 2>/dev/null && echo "python-pptx OK" || echo "pip install python-pptx"
+python3 -c "import openpyxl" 2>/dev/null && echo "openpyxl OK" || echo "pip install openpyxl"
+python3 -c "import yaml" 2>/dev/null && echo "PyYAML OK" || echo "pip install pyyaml"
+```
+
+### Install Steps (skip what's already there)
+
+1. **Chroma** — `curl -fsS http://127.0.0.1:8100/api/v2/heartbeat` responds → skip. Otherwise deploy (see Step 1).
+2. **Embedding model** — `ls ~/.cache/modelscope/models/google--embeddinggemma-300m` exists → skip. Otherwise auto-downloads on first use.
+3. **Python packages** — import-check each. Only `pip install` missing ones.
+4. **Copy skill** to `~/.hermes/skills/mlops/local-rag/` (Hermes) or your agent's skill dir.
+5. **Ask user** for their first collection name.
+6. **Create collection** and run `smoke` to verify.
 
 ---
 

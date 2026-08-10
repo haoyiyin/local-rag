@@ -339,14 +339,14 @@ def cmd_purge(args):
     if n == 0:
         print(json.dumps({"purged": args.name, "deleted": 0}))
         return
-    # get all IDs and delete in batches
     all_ids = []
     while True:
         batch = col.get(limit=1000, include=[])
-        if not batch.ids:
+        ids = batch["ids"] if isinstance(batch, dict) else batch.ids
+        if not ids:
             break
-        all_ids.extend(batch.ids)
-        if len(batch.ids) < 1000:
+        all_ids.extend(ids)
+        if len(ids) < 1000:
             break
     col.delete(ids=all_ids)
     print(json.dumps({"purged": args.name, "deleted": len(all_ids)}))

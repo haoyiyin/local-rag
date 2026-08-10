@@ -99,10 +99,18 @@ python3 scripts/rag.py info my-notes
 
 | Command | Description |
 |---------|-------------|
-| `ingest <path>` | Store a file (supports 20+ formats) |
+| `ingest <path>` | Store a file or archive (see supported formats below) |
 | `ingest-text "text"` | Store a text string directly |
 | `ask "query"` | Semantic search with natural language |
 | `smoke` | Test connectivity |
+
+**Supported file formats:**
+`.md` `.txt` `.pdf` `.docx` `.pptx` `.xlsx` `.csv` `.html` `.json` `.yaml` `.epub` `.rtf` `.msg` `.ipynb` `.odt` plus images (OCR) and audio (Whisper).
+
+**Supported archives** (auto-detected, extracts all files inside):
+`.zip` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tbz2` `.tar.xz` `.txz` `.7z` `.rar`
+
+When an archive is uploaded, it automatically extracts all text files inside (skipping binary files like images/audio/video) and ingests them individually. Each file's source is recorded as `archive_name/filename`.
 
 All data commands accept `-c <collection>` to target a specific collection.
 
@@ -162,6 +170,10 @@ Copy to the correct path based on your agent:
 **Ask the user:** "What would you like to name your knowledge base?"
 
 Then run: `python3 scripts/rag.py create <user-provided-name>`
+
+After creating, tell the user what they can upload:
+- **Files:** `.md` `.txt` `.pdf` `.docx` `.pptx` `.xlsx` `.csv` `.html` `.json` `.yaml` `.epub` `.rtf` `.msg` `.ipynb` `.odt` plus images and audio
+- **Archives:** `.zip` `.tar.gz` `.7z` `.rar` and other tar variants — auto-extracts all files inside
 
 Confirm: `python3 scripts/rag.py smoke`
 

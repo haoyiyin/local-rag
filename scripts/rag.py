@@ -18,8 +18,22 @@ _EMBED_FN = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
 def _client():
     return chromadb.PersistentClient(path=CHROMA_PATH)
 
-def _coll(c, name=None):
-    return c.get_or_create_collection(name or COLL, embedding_function=_EMBED_FN)
+def _coll_required(c, name):
+    """Get collection by name, fail if doesn't exist. Prevents silent typo errors."""
+    if not name:
+        sys.exit("error: collection name required (use -c <name>)")
+    try:
+        return c.get_collection(name, embedding_function=_EMBED_FN)
+    except Exception:
+        existing = [col.name for col in c.list_collections()]
+        sys.exit(f"error: collection '{name}' does not exist. Available: {existing}")
+
+
+def _coll_required_or_auto(c, name):
+    """Get collection — fail strict, or fall back to default."""
+    if name:
+        return _coll_required(c, name)
+    return c.get_or_create_collection(COLL, embedding_function=_EMBED_FN)
 
 def _id(source, idx):
     return hashlib.sha1(f"{source}\0{idx}".encode()).hexdigest()[:16]
@@ -410,7 +424,7 @@ def cmd_purge(args):
 
 def cmd_ingest(args):
     c = _client()
-    col = _coll(c, args.collection)
+    col = _coll_required(c, args.collection)
 
     # Archive: extract and ingest all files inside
     if args.path != "-" and _is_archive(args.path):
@@ -489,6 +503,9 @@ def cmd_ingest(args):
 
 
 def cmd_ingest_text(args):
+    c = _client()
+    col = _coll_required(c, args.collection)
+
     text = args.text
     source = args.source or "inline"
     chunks = _chunks(text)
@@ -498,20 +515,18 @@ def cmd_ingest_text(args):
         for i in range(len(chunks))
     ]
 
-    c = _client()
-    col = _coll(c, args.collection)
     try:
         col.delete(where={"source": source})
     except Exception:
         pass
 
     col.add(documents=chunks, metadatas=metas, ids=ids)
-    print(json.dumps({"chunks_added": len(chunks), "source": source, "collection": args.collection or COLL}))
+    print(json.dumps({"chunks_added": len(chunks), "source": source, "collection": args.collection}))
 
 
 def cmd_ask(args):
     c = _client()
-    col = _coll(c, args.collection)
+    col = _coll_required(c, args.collection)
 
     where = None
     if args.tag:
@@ -574,24 +589,24 @@ def main():
     pp = sub.add_parser("purge", help="Delete all records in a collection")
     pp.add_argument("name", help="Collection name")
 
-    # --- Data commands ---
+    # --- Data commands (require -c, refuse if collection doesn't exist) ---
     pi = sub.add_parser("ingest", help="Store a file (or stdin with -)")
     pi.add_argument("path", help="File path or '-' for stdin")
     pi.add_argument("--tag", default="", help="Optional tag for filtering")
     pi.add_argument("--source", default=None, help="Override source label")
-    pi.add_argument("--collection", "-c", default=None, help="Target collection")
+    pi.add_argument("--collection", "-c", required=True, help="Target collection (must already exist — use 'list' to see available)")
 
     pit = sub.add_parser("ingest-text", help="Store explicit text string")
     pit.add_argument("text", help="Text to store")
     pit.add_argument("--tag", default="", help="Optional tag")
     pit.add_argument("--source", default=None, help="Source label")
-    pit.add_argument("--collection", "-c", default=None, help="Target collection")
+    pit.add_argument("--collection", "-c", required=True, help="Target collection (must already exist)")
 
     pa = sub.add_parser("ask", help="Retrieve relevant chunks")
     pa.add_argument("query", help="Search query")
     pa.add_argument("--k", type=int, default=5, help="Number of results (default 5)")
     pa.add_argument("--tag", default=None, help="Filter by tag")
-    pa.add_argument("--collection", "-c", default=None, help="Target collection")
+    pa.add_argument("--collection", "-c", required=True, help="Target collection (must already exist)")
 
     ps = sub.add_parser("smoke", help="Quick connectivity test")
 

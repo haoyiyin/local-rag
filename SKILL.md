@@ -65,12 +65,14 @@ All output is JSON. `list` returns `[{name, id, count, metadata}]`.
 
 All data commands support `-c <collection>` to target a specific collection (default: `$KB_COLLECTION` or `default`).
 
+**Strict mode:** `-c` is **required** for `ingest`, `ingest-text`, and `ask`. If the collection doesn't exist, the command fails and lists available collections. This prevents silent errors from typos or wrong collection names.
+
 #### ingest — store files (including archives)
 
 ```bash
-python3 scripts/rag.py ingest <path> [--tag TAG] [--source LABEL] [-c COLLECTION]
-echo "text" | python3 scripts/rag.py ingest - [--tag TAG] [-c COLLECTION]
-python3 scripts/rag.py ingest-text "text" [--source LABEL] [--tag TAG] [-c COLLECTION]
+python3 scripts/rag.py ingest <path> -c COLLECTION [--tag TAG] [--source LABEL]
+echo "text" | python3 scripts/rag.py ingest - -c COLLECTION [--tag TAG]
+python3 scripts/rag.py ingest-text "text" -c COLLECTION [--source LABEL] [--tag TAG]
 ```
 
 **Supported file formats:** `.md` `.txt` `.pdf` `.docx` `.pptx` `.xlsx` `.csv` `.html` `.json` `.yaml` `.epub` `.rtf` `.msg` `.ipynb` `.odt`
@@ -85,7 +87,7 @@ Behavior: splits on blank lines, cap ~1200 chars/chunk. ID = `sha1(source+index)
 #### ask — retrieve
 
 ```bash
-python3 scripts/rag.py ask "<question>" [--k 5] [--tag TAG] [-c COLLECTION]
+python3 scripts/rag.py ask "<question>" -c COLLECTION [--k 5] [--tag TAG]
 ```
 
 Returns JSON: `[{source, tag, chunk, score}]`. Score = distance (lower = more similar). Threshold `< 1.2` ≈ citable.

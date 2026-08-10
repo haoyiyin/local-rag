@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""local-rag: ingest, ask, and manage Chroma collections."""
+
+import argparse, hashlib, json, os, sys, textwrap, time
+from datetime import datetime, timezone
+
+import chromadb
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
+
+HOST = os.environ.get("CHROMA_HOST", "127.0.0.1")
+PORT = int(os.environ.get("CHROMA_PORT", "8100"))
+COLL = os.environ.get("KB_COLLECTION", "default")
+EMBED_MODEL = os.environ.get("KB_EMBED_MODEL", "/home/ubuntu/.cache/modelscope/models/google--embeddinggemma-300m/snapshots/master")
+_EMBED_FN = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
+
+
+def _client():
+    return chromadb.HttpClient(host=HOST, port=PORT)
+
+def _coll(c, name=None):
+    return c.get_or_create_collection(name or COLL, embedding_function=_EMBED_FN)
+
+def _id(source, idx):
+    return hashlib.sha1(f"{source}\0{idx}".encode()).hexdigest()[:16]
+
+def _chunks(text, max_chars=1200):
+    """Split text on blank lines, cap each chunk."""
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    chunks = []
+    cur = []
+    cur_len = 0
+    for p in paragraphs:
+        if cur_len + len(p) + 1 > max_chars and cur:
+            chunks.append("\n\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(p)
+        cur_len += len(p) + 1
+    if cur:
+        chunks.append("\n\n".join(cur))
+    return chunks or [text[:max_chars]]
+
+
+def _read_file(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            sys.exit("PDF support requires pypdf. Run: pip install pypdf")
+        reader = PdfReader(path)
+        text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
+        if len(text.strip()) > 50:
+            return text
+        try:
+            import pymupdf
+            import pytesseract
+            from PIL import Image
+            import io
+        except ImportError:
+            print("WARNING: image PDF detected but pymupdf/pytesseract not available; returning partial text", file=sys.stderr)
+            return text
+        doc = pymupdf.open(path)
+        ocr_parts = []
+        for page in doc:
+            mat = pymupdf.Matrix(2, 2)
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            page_text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+            if page_text.strip():
+                ocr_parts.append(page_text.strip())
+        doc.close()
+        return "\n\n".join(ocr_parts) or text
+    elif ext in (".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".opus"):
+        try:
+            import whisper
+        except ImportError:
+            sys.exit("Audio support requires openai-whisper. Run: pip install openai-whisper")
+        model = whisper.load_model("base")
+        result = model.transcribe(path, fp16=False)
+        lang = result.get("language", "")
+        text = result.get("text", "").strip()
+        if text:
+            return f"[audio lang={lang}]\n{text}"
+        return ""
+    elif ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp"):
+        try:
+            import pytesseract
+            from PIL import Image
+        except ImportError:
+            sys.exit("Image OCR requires pytesseract + Pillow. Run: pip install pytesseract Pillow")
+        img = Image.open(path)
+        text = pytesseract.image_to_string(img, lang="chi_sim+eng").strip()
+        return f"[image ocr]\n{text}" if text else ""
+    elif ext == ".docx":
+        try:
+            import docx
+        except ImportError:
+            sys.exit("DOCX support requires python-docx. Run: pip install python-docx")
+        doc = docx.Document(path)
+        return "\n\n".join(p.text for p in doc.paragraphs)
+    elif ext == ".pptx":
+        try:
+            from pptx import Presentation
+        except ImportError:
+            sys.exit("PPTX support requires python-pptx. Run: pip install python-pptx")
+        prs = Presentation(path)
+        parts = []
+        for slide in prs.slides:
+            texts = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        t = para.text.strip()
+                        if t:
+                            texts.append(t)
+            if texts:
+                parts.append("\n".join(texts))
+        return "\n\n".join(parts)
+    elif ext in (".xlsx", ".xls"):
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            sys.exit("XLSX support requires openpyxl. Run: pip install openpyxl")
+        wb = load_workbook(path, read_only=True, data_only=True)
+        parts = []
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                vals = [str(c) for c in row if c is not None]
+                if vals:
+                    rows.append("\t".join(vals))
+            if rows:
+                parts.append(f"[{sheet}]\n" + "\n".join(rows))
+        wb.close()
+        return "\n\n".join(parts)
+    elif ext == ".csv":
+        import csv, io
+        with open(path, newline="", encoding="utf-8", errors="replace") as f:
+            reader = csv.reader(f)
+            rows = ["\t".join(row) for row in reader if any(c.strip() for c in row)]
+        return "\n".join(rows)
+    elif ext in (".html", ".htm"):
+        from html.parser import HTMLParser
+        class _HTMLText(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self._parts = []
+                self._skip = False
+            def handle_starttag(self, tag, attrs):
+                if tag in ("script", "style"):
+                    self._skip = True
+            def handle_endtag(self, tag):
+                if tag in ("script", "style"):
+                    self._skip = False
+            def handle_data(self, data):
+                if not self._skip:
+                    self._parts.append(data)
+            def text(self):
+                return " ".join(self._parts)
+        with open(path, encoding="utf-8", errors="replace") as f:
+            parser = _HTMLText()
+            parser.feed(f.read())
+        return parser.text()
+    elif ext in (".json", ".jsonl"):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return json.dumps(data, ensure_ascii=False, indent=2)
+    elif ext in (".yaml", ".yml"):
+        try:
+            import yaml
+        except ImportError:
+            sys.exit("YAML support requires PyYAML. Run: pip install pyyaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return json.dumps(data, ensure_ascii=False, indent=2) if not isinstance(data, str) else data
+    elif ext == ".odt":
+        try:
+            from odf.opendocument import load
+            from odf.text import P
+        except ImportError:
+            sys.exit("ODT support requires odfpy. Run: pip install odfpy")
+        doc = load(path)
+        parts = [elem.firstChild.data if elem.firstChild else "" for elem in doc.getElementsByType(P)]
+        return "\n\n".join(p for p in parts if p.strip())
+    elif ext == ".epub":
+        try:
+            import ebooklib
+            from ebooklib import epub
+            from html.parser import HTMLParser
+        except ImportError:
+            sys.exit("EPUB support requires ebooklib. Run: pip install ebooklib")
+        class _EpubText(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self._parts = []
+                self._skip = False
+            def handle_starttag(self, tag, attrs):
+                if tag in ("script", "style"):
+                    self._skip = True
+            def handle_endtag(self, tag):
+                if tag in ("script", "style"):
+                    self._skip = False
+            def handle_data(self, data):
+                if not self._skip:
+                    self._parts.append(data)
+            def text(self):
+                return " ".join(self._parts)
+        book = epub.read_epub(path)
+        parts = []
+        for item in book.get_items():
+            if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                p = _EpubText()
+                p.feed(item.get_content().decode("utf-8", errors="replace"))
+                t = p.text().strip()
+                if t:
+                    parts.append(t)
+        return "\n\n".join(parts)
+    elif ext == ".rtf":
+        from striprtf.striprtf import rtf_to_text
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return rtf_to_text(f.read())
+    elif ext == ".msg":
+        try:
+            import extract_msg
+        except ImportError:
+             sys.exit("MSG support requires extract-msg. Run: pip install extract-msg")
+        msg = extract_msg.Message(path)
+        parts = [f"From: {msg.sender}", f"To: {msg.to}", f"Subject: {msg.subject}", f"Date: {msg.date}"]
+        body = msg.body or ""
+        parts.append(body)
+        return "\n\n".join(p for p in parts if p)
+    elif ext == ".ipynb":
+        with open(path, encoding="utf-8") as f:
+            nb = json.load(f)
+        parts = []
+        for cell in nb.get("cells", []):
+            ctype = cell.get("cell_type", "")
+            src = "".join(cell.get("source", []))
+            if ctype == "markdown":
+                parts.append(src)
+            elif ctype == "code":
+                outs = []
+                for out in cell.get("outputs", []):
+                    if "text" in out:
+                        outs.append("".join(out["text"]))
+                    elif "data" in out:
+                        for k, v in out["data"].items():
+                            if k.startswith("text/"):
+                                outs.append("".join(v) if isinstance(v, list) else v)
+                if outs:
+                    parts.append(f"[code]\n{src}\n[output]\n" + "\n".join(outs))
+                else:
+                    parts.append(f"[code]\n{src}")
+        return "\n\n".join(parts)
+    else:
+        with open(path) as f:
+            return f.read()
+
+
+# ─── Collection management commands ───
+
+def cmd_list(args):
+    """List all collections with record counts."""
+    c = _client()
+    cols = c.list_collections(limit=args.limit, offset=args.offset)
+    if not cols:
+        print("no collections")
+        return
+    rows = []
+    for col in cols:
+        n = col.count()
+        meta = col.metadata or {}
+        rows.append({"name": col.name, "id": str(col.id), "count": n, "metadata": meta})
+    print(json.dumps(rows, ensure_ascii=False, indent=2))
+
+
+def cmd_create(args):
+    """Create a new collection with default embedding function."""
+    c = _client()
+    metadata = {}
+    if args.meta:
+        for kv in args.meta:
+            k, _, v = kv.partition("=")
+            # try to parse as JSON value, else keep as string
+            try:
+                metadata[k] = json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                metadata[k] = v
+    col = c.create_collection(
+        args.name,
+        embedding_function=_EMBED_FN,
+        metadata=metadata or None,
+    )
+    print(json.dumps({"created": col.name, "id": str(col.id), "embedding_model": EMBED_MODEL}))
+
+
+def cmd_delete(args):
+    """Delete a collection by name."""
+    c = _client()
+    c.delete_collection(args.name)
+    print(json.dumps({"deleted": args.name}))
+
+
+def cmd_info(args):
+    """Show collection details: count, metadata, sample records."""
+    c = _client()
+    col = c.get_collection(args.name)
+    n = col.count()
+    peek = col.peek(limit=args.sample)
+    # peek returns dict in client-server mode
+    p_ids = peek["ids"] if isinstance(peek, dict) else peek.ids
+    p_docs = peek["documents"] if isinstance(peek, dict) else peek.documents
+    p_metas = peek["metadatas"] if isinstance(peek, dict) else peek.metadatas
+    info = {
+        "name": col.name,
+        "id": str(col.id),
+        "count": n,
+        "metadata": col.metadata,
+        "sample_ids": p_ids,
+        "sample_documents": p_docs,
+        "sample_metadatas": p_metas,
+    }
+    print(json.dumps(info, ensure_ascii=False, indent=2))
+
+
+def cmd_rename(args):
+    """Rename a collection."""
+    c = _client()
+    col = c.get_collection(args.old_name)
+    col.modify(name=args.new_name)
+    print(json.dumps({"renamed": f"{args.old_name} → {args.new_name}"}))
+
+
+def cmd_purge(args):
+    """Delete all records in a collection (keeps the collection)."""
+    c = _client()
+    col = c.get_collection(args.name)
+    n = col.count()
+    if n == 0:
+        print(json.dumps({"purged": args.name, "deleted": 0}))
+        return
+    # get all IDs and delete in batches
+    all_ids = []
+    while True:
+        batch = col.get(limit=1000, include=[])
+        if not batch.ids:
+            break
+        all_ids.extend(batch.ids)
+        if len(batch.ids) < 1000:
+            break
+    col.delete(ids=all_ids)
+    print(json.dumps({"purged": args.name, "deleted": len(all_ids)}))
+
+
+# ─── Data commands ───
+
+def cmd_ingest(args):
+    source = args.path
+    if args.path == "-":
+        text = sys.stdin.read()
+        source = args.source or "stdin"
+    else:
+        text = _read_file(args.path)
+        source = args.source or os.path.basename(args.path)
+
+    chunks = _chunks(text)
+    ids = [_id(source, i) for i in range(len(chunks))]
+    metas = [
+        {"source": source, "tag": args.tag or "", "chunk_idx": i, "ingested_at": datetime.now(timezone.utc).isoformat()}
+        for i in range(len(chunks))
+    ]
+
+    c = _client()
+    col = _coll(c, args.collection)
+
+    # Delete existing chunks for this source to keep idempotent
+    try:
+        col.delete(where={"source": source})
+    except Exception:
+        pass
+
+    col.add(documents=chunks, metadatas=metas, ids=ids)
+    print(json.dumps({"chunks_added": len(chunks), "source": source, "collection": args.collection or COLL}))
+
+
+def cmd_ingest_text(args):
+    text = args.text
+    source = args.source or "inline"
+    chunks = _chunks(text)
+    ids = [_id(source, i) for i in range(len(chunks))]
+    metas = [
+        {"source": source, "tag": args.tag or "", "chunk_idx": i, "ingested_at": datetime.now(timezone.utc).isoformat()}
+        for i in range(len(chunks))
+    ]
+
+    c = _client()
+    col = _coll(c, args.collection)
+    try:
+        col.delete(where={"source": source})
+    except Exception:
+        pass
+
+    col.add(documents=chunks, metadatas=metas, ids=ids)
+    print(json.dumps({"chunks_added": len(chunks), "source": source, "collection": args.collection or COLL}))
+
+
+def cmd_ask(args):
+    c = _client()
+    col = _coll(c, args.collection)
+
+    where = None
+    if args.tag:
+        where = {"tag": args.tag}
+
+    results = col.query(
+        query_texts=[args.query],
+        n_results=args.k,
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    out = []
+    if results["documents"] and results["documents"][0]:
+        for i, doc in enumerate(results["documents"][0]):
+            meta = results["metadatas"][0][i] if results["metadatas"] else {}
+            out.append({
+                "source": meta.get("source", "?"),
+                "tag": meta.get("tag", ""),
+                "chunk": doc,
+                "score": round(results["distances"][0][i], 4) if results["distances"] else 0.0,
+            })
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def cmd_smoke(args):
+    c = _client()
+    col = _coll(c)
+    col.upsert(documents=["smoke test"], ids=["__smoke"], metadatas=[{"source": "__smoke"}])
+    r = col.query(query_texts=["smoke"], n_results=1)
+    hits = len(r["documents"][0]) if r["documents"] else 0
+    col.delete(ids=["__smoke"])
+    print(json.dumps({"smoke_ok": True, "hits": hits}))
+
+
+def main():
+    p = argparse.ArgumentParser(description="local-rag: Chroma knowledge base CLI")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # --- Collection management ---
+    pl = sub.add_parser("list", help="List all collections")
+    pl.add_argument("--limit", type=int, default=100, help="Max collections to list")
+    pl.add_argument("--offset", type=int, default=0, help="Offset for pagination")
+
+    pc = sub.add_parser("create", help="Create a new collection")
+    pc.add_argument("name", help="Collection name")
+    pc.add_argument("--meta", nargs="*", help="Metadata as key=value pairs")
+
+    pd = sub.add_parser("delete", help="Delete a collection")
+    pd.add_argument("name", help="Collection name to delete")
+
+    pi_info = sub.add_parser("info", help="Show collection details")
+    pi_info.add_argument("name", help="Collection name")
+    pi_info.add_argument("--sample", type=int, default=3, help="Number of sample records")
+
+    pr = sub.add_parser("rename", help="Rename a collection")
+    pr.add_argument("old_name", help="Current name")
+    pr.add_argument("new_name", help="New name")
+
+    pp = sub.add_parser("purge", help="Delete all records in a collection")
+    pp.add_argument("name", help="Collection name")
+
+    # --- Data commands ---
+    pi = sub.add_parser("ingest", help="Store a file (or stdin with -)")
+    pi.add_argument("path", help="File path or '-' for stdin")
+    pi.add_argument("--tag", default="", help="Optional tag for filtering")
+    pi.add_argument("--source", default=None, help="Override source label")
+    pi.add_argument("--collection", "-c", default=None, help="Target collection")
+
+    pit = sub.add_parser("ingest-text", help="Store explicit text string")
+    pit.add_argument("text", help="Text to store")
+    pit.add_argument("--tag", default="", help="Optional tag")
+    pit.add_argument("--source", default=None, help="Source label")
+    pit.add_argument("--collection", "-c", default=None, help="Target collection")
+
+    pa = sub.add_parser("ask", help="Retrieve relevant chunks")
+    pa.add_argument("query", help="Search query")
+    pa.add_argument("--k", type=int, default=5, help="Number of results (default 5)")
+    pa.add_argument("--tag", default=None, help="Filter by tag")
+    pa.add_argument("--collection", "-c", default=None, help="Target collection")
+
+    ps = sub.add_parser("smoke", help="Quick connectivity test")
+
+    args = p.parse_args()
+
+    cmds = {
+        "list": cmd_list, "create": cmd_create, "delete": cmd_delete,
+        "info": cmd_info, "rename": cmd_rename, "purge": cmd_purge,
+        "ingest": cmd_ingest, "ingest-text": cmd_ingest_text,
+        "ask": cmd_ask, "smoke": cmd_smoke,
+    }
+    try:
+        cmds[args.cmd](args)
+    except Exception as e:
+        msg = str(e)
+        if "Connection refused" in msg or "Cannot connect" in msg:
+            sys.exit(f"Chroma down — run: docker compose -f ~/chroma/docker-compose.yml up -d")
+        if "No module named" in msg:
+            sys.exit(f"Missing dependency: {msg}. Run: pip install chromadb")
+        raise
+
+
+if __name__ == "__main__":
+    main()

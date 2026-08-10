@@ -176,45 +176,68 @@ All data commands accept `-c <collection>` to target a specific collection.
 
 ## Agent Installation Guide
 
-This skill is designed to be installed by AI agents. **Check each dependency before installing — skip if already present.**
+This section is for AI agents installing this skill. **Do not install anything that already exists.**
 
-### Pre-flight Checks
+### Phase 1: Check Everything First
+
+Run ALL of these checks before installing anything. Collect the results.
 
 ```bash
-# 1. Chroma running?
-if curl -fsS http://127.0.0.1:8100/api/v2/heartbeat >/dev/null 2>&1; then
-  echo "Chroma OK — skip deploy"
-else
-  echo "Chroma not running — need docker compose deploy"
-fi
+# Chroma server
+curl -fsS http://127.0.0.1:8100/api/v2/heartbeat 2>/dev/null && echo "CHROMA=ok" || echo "CHROMA=missing"
 
-# 2. Docker available? (only needed if deploying Chroma)
-docker --version 2>/dev/null || echo "Docker missing — ask user to install"
+# Docker (only needed if Chroma is missing)
+docker --version 2>/dev/null && echo "DOCKER=ok" || echo "DOCKER=missing"
 
-# 3. Embedding model cached?
-if [ -d "$HOME/.cache/modelscope/models/google--embeddinggemma-300m" ]; then
-  echo "Model OK — skip download"
-else
-  echo "Model not cached — will auto-download on first use (~80MB)"
-fi
+# Embedding model
+[ -d "$HOME/.cache/modelscope/models/google--embeddinggemma-300m" ] && echo "MODEL=ok" || echo "MODEL=missing"
 
-# 4. Python deps (import-check each, install only missing)
-python3 -c "import chromadb" 2>/dev/null && echo "chromadb OK" || echo "pip install chromadb"
-python3 -c "import pypdf" 2>/dev/null && echo "pypdf OK" || echo "pip install pypdf"
-python3 -c "import docx" 2>/dev/null && echo "python-docx OK" || echo "pip install python-docx"
-python3 -c "import pptx" 2>/dev/null && echo "python-pptx OK" || echo "pip install python-pptx"
-python3 -c "import openpyxl" 2>/dev/null && echo "openpyxl OK" || echo "pip install openpyxl"
-python3 -c "import yaml" 2>/dev/null && echo "PyYAML OK" || echo "pip install pyyaml"
+# Python packages (chromadb is required, rest are optional)
+python3 -c "import chromadb" 2>/dev/null && echo "chromadb=ok" || echo "chromadb=missing"
+python3 -c "import pypdf" 2>/dev/null && echo "pypdf=ok" || echo "pypdf=missing"
+python3 -c "import docx" 2>/dev/null && echo "python-docx=ok" || echo "python-docx=missing"
+python3 -c "import pptx" 2>/dev/null && echo "python-pptx=ok" || echo "python-pptx=missing"
+python3 -c "import openpyxl" 2>/dev/null && echo "openpyxl=ok" || echo "openpyxl=missing"
+python3 -c "import yaml" 2>/dev/null && echo "pyyaml=ok" || echo "pyyaml=missing"
+python3 -c "import ebooklib" 2>/dev/null && echo "ebooklib=ok" || echo "ebooklib=missing"
+python3 -c "import whisper" 2>/dev/null && echo "openai-whisper=ok" || echo "openai-whisper=missing"
+python3 -c "import pytesseract" 2>/dev/null && echo "pytesseract=ok" || echo "pytesseract=missing"
+python3 -c "import fitz" 2>/dev/null && echo "pymupdf=ok" || echo "pymupdf=missing"
 ```
 
-### Install Steps (skip what's already there)
+### Phase 2: Install Only What's Missing
 
-1. **Chroma** — `curl -fsS http://127.0.0.1:8100/api/v2/heartbeat` responds → skip. Otherwise deploy (see Step 1).
-2. **Embedding model** — `ls ~/.cache/modelscope/models/google--embeddinggemma-300m` exists → skip. Otherwise auto-downloads on first use.
-3. **Python packages** — import-check each. Only `pip install` missing ones.
-4. **Copy skill** to `~/.hermes/skills/mlops/local-rag/` (Hermes) or your agent's skill dir.
-5. **Ask user** for their first collection name.
-6. **Create collection** and run `smoke` to verify.
+Based on Phase 1 results, install only the items marked `missing`. **Skip everything marked `ok`.**
+
+**If CHROMA=missing:**
+1. Check DOCKER first. If DOCKER=missing, tell the user to install Docker and stop.
+2. Deploy Chroma with docker compose (see Quick Start Step 1). Use port 8100.
+
+**If MODEL=missing:**
+- No action needed. It auto-downloads on first `rag.py` use (~80MB, 10-30s). Warn the user the first command will be slow.
+
+**If chromadb=missing:**
+- `pip install chromadb` (this is the only required dependency)
+
+**If any other Python package=missing:**
+- `pip install <package-name>` for each one marked missing
+
+### Phase 3: Install the Skill
+
+Copy to the correct path based on your agent:
+
+| Agent | Path |
+|---|---|
+| Hermes Agent | `~/.hermes/skills/mlops/local-rag/` |
+| Other | Your agent's skills directory |
+
+### Phase 4: Create First Knowledge Base
+
+**Ask the user:** "What would you like to name your knowledge base?"
+
+Then run: `python3 scripts/rag.py create <user-provided-name>`
+
+Confirm: `python3 scripts/rag.py smoke`
 
 ---
 

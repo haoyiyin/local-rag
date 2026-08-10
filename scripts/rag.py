@@ -8,15 +8,14 @@ import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 
-HOST = os.environ.get("CHROMA_HOST", "127.0.0.1")
-PORT = int(os.environ.get("CHROMA_PORT", "8100"))
+CHROMA_PATH = os.environ.get("CHROMA_PATH", os.path.expanduser("~/.chroma/local-rag"))
 COLL = os.environ.get("KB_COLLECTION", "default")
-EMBED_MODEL = os.environ.get("KB_EMBED_MODEL", "/home/ubuntu/.cache/modelscope/models/google--embeddinggemma-300m/snapshots/master")
+EMBED_MODEL = os.environ.get("KB_EMBED_MODEL", os.path.expanduser("~/.cache/modelscope/models/google--embeddinggemma-300m/snapshots/master"))
 _EMBED_FN = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
 
 
 def _client():
-    return chromadb.HttpClient(host=HOST, port=PORT)
+    return chromadb.PersistentClient(path=CHROMA_PATH)
 
 def _coll(c, name=None):
     return c.get_or_create_collection(name or COLL, embedding_function=_EMBED_FN)
@@ -309,18 +308,14 @@ def cmd_info(args):
     col = c.get_collection(args.name)
     n = col.count()
     peek = col.peek(limit=args.sample)
-    # peek returns dict in client-server mode
-    p_ids = peek["ids"] if isinstance(peek, dict) else peek.ids
-    p_docs = peek["documents"] if isinstance(peek, dict) else peek.documents
-    p_metas = peek["metadatas"] if isinstance(peek, dict) else peek.metadatas
     info = {
         "name": col.name,
         "id": str(col.id),
         "count": n,
         "metadata": col.metadata,
-        "sample_ids": p_ids,
-        "sample_documents": p_docs,
-        "sample_metadatas": p_metas,
+        "sample_ids": peek.ids,
+        "sample_documents": peek.documents,
+        "sample_metadatas": peek.metadatas,
     }
     print(json.dumps(info, ensure_ascii=False, indent=2))
 
@@ -504,8 +499,6 @@ def main():
         cmds[args.cmd](args)
     except Exception as e:
         msg = str(e)
-        if "Connection refused" in msg or "Cannot connect" in msg:
-            sys.exit(f"Chroma down — run: docker compose -f ~/chroma/docker-compose.yml up -d")
         if "No module named" in msg:
             sys.exit(f"Missing dependency: {msg}. Run: pip install chromadb")
         raise

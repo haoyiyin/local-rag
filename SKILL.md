@@ -29,7 +29,7 @@ Data stored locally at `~/.chroma/local-rag` (PersistentClient, no server needed
 CHROMA_PATH=~/.chroma/local-rag  KB_COLLECTION=default
 ```
 
-`scripts/rag.py` reads these env vars. Embedding model: `embeddinggemma-300m` (768-dim, modelscope path).
+`scripts/rag.py` reads these env vars. Embedding model: `embeddinggemma-300m` **Q8_0 GGUF** (~334MB, 真量化) via llama.cpp, auto-downloaded from ModelScope on first use. 768-dim.
 
 ---
 
@@ -41,7 +41,7 @@ CHROMA_PATH=~/.chroma/local-rag  KB_COLLECTION=default
 # List all collections (with counts)
 python3 scripts/rag.py list [--limit N] [--offset N]
 
-# Create collection (auto-selects embeddinggemma-300m)
+# Create collection (auto-selects embeddinggemma-300m Q8_0 GGUF)
 python3 scripts/rag.py create <name> [--meta key1=val1 key2=val2]
 
 # Delete collection (⚠️ all data lost)
@@ -59,7 +59,7 @@ python3 scripts/rag.py purge <name>
 
 All output is JSON. `list` returns `[{name, id, count, metadata}]`.
 
-**Creating a new knowledge base:** When user asks to create a new KB, ask for the collection name, then run `create`. Default embedding model is always `embeddinggemma-300m` (768-dim, via modelscope). Do not ask about embedding model unless user explicitly wants a different one.
+**Creating a new knowledge base:** When user asks to create a new KB, ask for the collection name, then run `create`. Default embedding model is always `embeddinggemma-300m` **Q8_0 GGUF** (768-dim, via llama.cpp + ModelScope). Do not ask about embedding model unless user explicitly wants a different one.
 
 ### Data commands
 
@@ -448,7 +448,8 @@ col = c.get_or_create_collection("default")
 
 ## Pitfalls
 
-- **First call slow (~20s).** Embedding model download. Not a hang.
+- **First call slow (~1-3 min).** Q8 GGUF download (~334MB). Not a hang.
+- **Default embedding backend is llama-cpp-python.** Requires `pip install llama-cpp-python`. `KB_EMBED_MODEL` overrides to sentence-transformers (PyTorch) backend.
 - **Score = distance, not similarity.** Lower = better. Threshold 1.2 tuned for embeddinggemma-300m.
 - **Long single-line paste.** `ingest -` on 50k chars = one giant chunk. Bad for transcripts.
 - **`add()` ignores duplicate IDs silently.** Use `upsert()` to overwrite.

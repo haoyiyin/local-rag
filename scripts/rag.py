@@ -1,18 +1,112 @@
 #!/usr/bin/env python3
 """local-rag: ingest, ask, and manage Chroma collections."""
 
-import argparse, glob, hashlib, json, os, sys, textwrap, tempfile, time
+import argparse, glob, hashlib, json, os, sys, textwrap, tempfile, time, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-
 
 CHROMA_PATH = os.environ.get("CHROMA_PATH", os.path.expanduser("~/.chroma/local-rag"))
 COLL = os.environ.get("KB_COLLECTION", "default")
-EMBED_MODEL = os.environ.get("KB_EMBED_MODEL", os.path.expanduser("~/.cache/modelscope/models/google--embeddinggemma-300m/snapshots/master"))
-_EMBED_FN = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
+
+# Embedding model: default = embeddinggemma-300m Q8_0 GGUF (~334MB, true quantized).
+# Set KB_EMBED_MODEL to a local dir or HuggingFace/ModelScope sentence-transformers
+# model name to override with the PyTorch backend.
+_Q8_GGUF_REPO = "ggml-org/embeddinggemma-300M-GGUF"
+_Q8_GGUF_FILE = "embeddinggemma-300M-Q8_0.gguf"
+_EMBED_FN = None
+EMBED_MODEL = None
+
+
+def _modelscope_cache_dir(repo):
+    """Mirror the cache layout modelscope snapshot_download creates."""
+    return os.path.expanduser(f"~/.cache/modelscope/models/{repo.replace('/', '--')}/snapshots/master")
+
+
+def _modelscope_file_url(repo, filename):
+    return f"https://modelscope.cn/models/{repo}/resolve/master/{filename}"
+
+
+def _ensure_q8_gguf():
+    """Download embeddinggemma-300M Q8_0 GGUF on first use if missing."""
+    dest_dir = _modelscope_cache_dir(_Q8_GGUF_REPO)
+    dest = os.path.join(dest_dir, _Q8_GGUF_FILE)
+    if os.path.exists(dest):
+        return dest
+
+    os.makedirs(dest_dir, exist_ok=True)
+    tmp = dest + ".part"
+    url = _modelscope_file_url(_Q8_GGUF_REPO, _Q8_GGUF_FILE)
+    print(f"Downloading embedding model {_Q8_GGUF_FILE} (~334MB)...", file=sys.stderr)
+    req = urllib.request.Request(url, headers={"User-Agent": "local-rag/1.0"})
+    with urllib.request.urlopen(req) as r, open(tmp, "wb") as out:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            buf = r.read(1024 * 256)
+            if not buf:
+                break
+            out.write(buf)
+            done += len(buf)
+            if total:
+                pct = done * 100 // total
+                print(f"\r  {pct:3d}% ({done // (1024*1024)}/{total // (1024*1024)} MB)",
+                      file=sys.stderr, end="", flush=True)
+        if total:
+            print(file=sys.stderr)
+    if total and os.path.getsize(tmp) < total:
+        os.unlink(tmp)
+        sys.exit("Download incomplete. Re-run to resume.")
+    os.replace(tmp, dest)
+    return dest
+
+
+def _build_embed_fn():
+    """Lazy: return (embedding_function, model_label)."""
+    override = os.environ.get("KB_EMBED_MODEL", "").strip()
+    if override:
+        try:
+            from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+        except ImportError:
+            sys.exit("KB_EMBED_MODEL requires sentence-transformers. Run: pip install sentence-transformers")
+        return SentenceTransformerEmbeddingFunction(model_name=override), override
+
+    model_path = _ensure_q8_gguf()
+    try:
+        from llama_cpp import Llama
+    except ImportError:
+        sys.exit("Missing llama-cpp-python. Run: pip install llama-cpp-python")
+
+    class _LlamaCppEmbeddingFunction:
+        """GGUF Q8 backend. Llama.cpp applies EmbeddingGemma's ST Dense head,
+        so output matches the original 768-dim normalized embeddings."""
+        def __init__(self, path):
+            self._path = path
+            self._llm = None
+
+        def _load(self):
+            if self._llm is None:
+                self._llm = Llama(model_path=self._path, embedding=True, verbose=False)
+            return self._llm
+
+        def __call__(self, docs):
+            llm = self._load()
+            out = []
+            for d in docs:
+                emb = llm.embed(d, normalize=True)[0]
+                out.append(list(emb))
+            return out
+
+    return _LlamaCppEmbeddingFunction(model_path), f"gguf:{model_path}"
+
+
+def _embedding():
+    """Cached embedding function. Model downloads/loads on first use."""
+    global _EMBED_FN, EMBED_MODEL
+    if _EMBED_FN is None:
+        _EMBED_FN, EMBED_MODEL = _build_embed_fn()
+    return _EMBED_FN
 
 
 def _client():
@@ -23,7 +117,7 @@ def _coll_required(c, name):
     if not name:
         sys.exit("error: collection name required (use -c <name>)")
     try:
-        return c.get_collection(name, embedding_function=_EMBED_FN)
+        return c.get_collection(name, embedding_function=_embedding())
     except Exception:
         existing = [col.name for col in c.list_collections()]
         sys.exit(f"error: collection '{name}' does not exist. Available: {existing}")
@@ -33,7 +127,7 @@ def _coll_required_or_auto(c, name):
     """Get collection — fail strict, or fall back to default."""
     if name:
         return _coll_required(c, name)
-    return c.get_or_create_collection(COLL, embedding_function=_EMBED_FN)
+    return c.get_or_create_collection(COLL, embedding_function=_embedding())
 
 def _id(source, idx):
     return hashlib.sha1(f"{source}\0{idx}".encode()).hexdigest()[:16]
@@ -357,7 +451,7 @@ def cmd_create(args):
                 metadata[k] = v
     col = c.create_collection(
         args.name,
-        embedding_function=_EMBED_FN,
+        embedding_function=_embedding(),
         metadata=metadata or None,
     )
     print(json.dumps({"created": col.name, "id": str(col.id), "embedding_model": EMBED_MODEL}))
@@ -554,7 +648,7 @@ def cmd_ask(args):
 
 def cmd_smoke(args):
     c = _client()
-    col = _coll(c)
+    col = _coll_required_or_auto(c, None)
     col.upsert(documents=["smoke test"], ids=["__smoke"], metadatas=[{"source": "__smoke"}])
     r = col.query(query_texts=["smoke"], n_results=1)
     hits = len(r["documents"][0]) if r["documents"] else 0

@@ -7,7 +7,7 @@ A local Chroma-based knowledge base skill for AI agents. Store documents, notes,
 - **Ingest** any file format into a local Chroma database (20+ formats)
 - **Query** your personal knowledge base with natural language
 - **Manage** collections: create, list, rename, purge, delete
-- **Embed** with [embeddinggemma-300m](https://www.modelscope.cn/google/embeddinggemma-300m) (768-dim, runs locally, no API key needed)
+- **Embed** with [embeddinggemma-300m](https://www.modelscope.cn/google/embeddinggemma-300m) — default loads the **Q8_0 GGUF (~334MB, 真量化)** via llama.cpp; 768-dim, runs locally, no API key needed
 
 Supported formats: `.md` `.txt` `.pdf` `.docx` `.pptx` `.xlsx` `.csv` `.html` `.json` `.yaml` `.epub` `.rtf` `.msg` `.ipynb` `.odt` plus images (OCR) and audio (Whisper transcription).
 
@@ -20,6 +20,7 @@ Supported formats: `.md` `.txt` `.pdf` `.docx` `.pptx` `.xlsx` `.csv` `.html` `.
 ```bash
 # Required
 pip install chromadb
+pip install llama-cpp-python
 
 # Optional — install based on what formats you need
 pip install pypdf            # PDF
@@ -78,7 +79,7 @@ python3 scripts/rag.py info my-notes
 |----------|---------|-------------|
 | `CHROMA_PATH` | `~/.chroma/local-rag` | Local data storage path |
 | `KB_COLLECTION` | `default` | Default collection name |
-| `KB_EMBED_MODEL` | `~/.cache/modelscope/.../embeddinggemma-300m` | Embedding model path |
+| `KB_EMBED_MODEL` | *(auto)* Q8 GGUF cache path | Embedding model. Set to a sentence-transformers model/dir to override |
 
 ---
 
@@ -89,7 +90,7 @@ python3 scripts/rag.py info my-notes
 | Command | Description |
 |---------|-------------|
 | `list` | List all collections with record counts |
-| `create <name>` | Create a new collection (uses embeddinggemma-300m) |
+| `create <name>` | Create a new collection (uses embeddinggemma-300m Q8_0 GGUF) |
 | `delete <name>` | Delete a collection and all its data |
 | `info <name>` | Show collection details and sample records |
 | `rename <old> <new>` | Rename a collection |
@@ -128,8 +129,12 @@ Run ALL of these checks before installing anything. Collect the results.
 # Python + chromadb (required)
 python3 -c "import chromadb" 2>/dev/null && echo "chromadb=ok" || echo "chromadb=missing"
 
-# Embedding model
-[ -d "$HOME/.cache/modelscope/models/google--embeddinggemma-300m" ] && echo "MODEL=ok" || echo "MODEL=missing"
+# Embedding model — Q8 GGUF, auto-downloaded on first use
+python3 -c "import llama_cpp" 2>/dev/null && echo "llama-cpp=ok" || echo "llama-cpp=missing"
+[ -f "$HOME/.cache/modelscope/models/ggml-org--embeddinggemma-300M-GGUF/snapshots/master/embeddinggemma-300M-Q8_0.gguf" ] && echo "MODEL=ok" || echo "MODEL=missing"
+
+# Optional sentence-transformers backend (only when KB_EMBED_MODEL is set)
+python3 -c "import sentence_transformers" 2>/dev/null && echo "sentence-transformers=ok" || echo "sentence-transformers=missing"
 
 # Python packages (optional, install based on user's format needs)
 python3 -c "import pypdf" 2>/dev/null && echo "pypdf=ok" || echo "pypdf=missing"
@@ -148,10 +153,16 @@ python3 -c "import fitz" 2>/dev/null && echo "pymupdf=ok" || echo "pymupdf=missi
 Based on Phase 1 results, install only items marked `missing`. **Skip everything marked `ok`.**
 
 **If chromadb=missing:**
-- `pip install chromadb` (only required dependency)
+- `pip install chromadb`
+
+**If llama-cpp=missing:**
+- `pip install llama-cpp-python` (required — default Q8 GGUF backend)
 
 **If MODEL=missing:**
-- No action needed. Auto-downloads on first `rag.py` use (~80MB, 10-30s). Warn the user.
+- No action needed. `rag.py` auto-downloads `embeddinggemma-300M-Q8_0.gguf` from ModelScope on first use (~334MB, 1-3 min). Warn the user.
+
+**If sentence-transformers=missing:**
+- Only needed if user sets `KB_EMBED_MODEL` to a PyTorch sentence-transformers model. Skip otherwise.
 
 **If any other Python package=missing:**
 - `pip install <package-name>` for each one
